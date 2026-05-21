@@ -6,6 +6,7 @@ from collections import defaultdict
 
 import httpx
 import nats
+import docker
 from fastapi import FastAPI, HTTPException
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -18,6 +19,11 @@ NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:3b")
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
+SCALE_THRESHOLD = int(os.getenv("SCALE_THRESHOLD", "10"))
+SCALE_MAX_REPLICAS = int(os.getenv("SCALE_MAX_REPLICAS", "3"))
+SCALE_COOLDOWN_SEC = int(os.getenv("SCALE_COOLDOWN_SEC", "30"))
+SCALE_TARGET_SERVICE = os.getenv("SCALE_TARGET_SERVICE", "agent-task")
+COMPOSE_PROJECT = os.getenv("COMPOSE_PROJECT_NAME", "project-management-mas")
 
 app = FastAPI(title="Project Management MAS")
 
@@ -26,6 +32,8 @@ pending = {}
 metrics = defaultdict(int)
 agent_health = defaultdict(lambda: {"processed": 0})
 tracer = trace.get_tracer("orchestrator")
+docker_client = None
+last_scale_ts = 0.0
 
 class ProjectTask(BaseModel):
     title: str
@@ -57,7 +65,7 @@ async def on_result(msg):
 
 @app.on_event("startup")
 async def startup():
-    global nc
+    global nc, docker_client
     resource = Resource.create({"service.name": "orchestrator"})
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True)
@@ -65,12 +73,61 @@ async def startup():
     trace.set_tracer_provider(provider)
     nc = await nats.connect(NATS_URL)
     await nc.subscribe("results.*", cb=on_result)
+    try:
+        docker_client = docker.from_env()
+    except Exception:
+        docker_client = None
 
 
 @app.on_event("shutdown")
 async def shutdown():
     if nc:
         await nc.close()
+    if docker_client:
+        docker_client.close()
+
+
+def _scale_if_needed() -> bool:
+    """Auto-scale one extra agent container when queue pressure is high."""
+    global last_scale_ts
+    if docker_client is None:
+        return False
+    if len(pending) <= SCALE_THRESHOLD:
+        return False
+
+    now = asyncio.get_event_loop().time()
+    if now - last_scale_ts < SCALE_COOLDOWN_SEC:
+        return False
+
+    filters = {
+        "label": [
+            f"com.docker.compose.project={COMPOSE_PROJECT}",
+            f"com.docker.compose.service={SCALE_TARGET_SERVICE}",
+        ]
+    }
+    running = docker_client.containers.list(filters=filters)
+    if len(running) >= SCALE_MAX_REPLICAS:
+        return False
+
+    image = f"{COMPOSE_PROJECT}-{SCALE_TARGET_SERVICE}"
+    network = f"{COMPOSE_PROJECT}_default"
+    container_name = f"{COMPOSE_PROJECT}-{SCALE_TARGET_SERVICE}-auto-{int(now)}"
+    docker_client.containers.run(
+        image=image,
+        name=container_name,
+        detach=True,
+        network=network,
+        environment={"NATS_URL": NATS_URL, "AGENT_ID": f"{SCALE_TARGET_SERVICE}-auto"},
+        labels={
+            "com.docker.compose.project": COMPOSE_PROJECT,
+            "com.docker.compose.service": SCALE_TARGET_SERVICE,
+            "mas.autoscaled": "true",
+        },
+        restart_policy={"Name": "unless-stopped"},
+    )
+    last_scale_ts = now
+    metrics["scale_actions"] += 1
+    return True
 
 
 @app.get("/health")
@@ -103,8 +160,9 @@ async def run_pipeline(task: ProjectTask):
             step5 = await request("tasks.llm", llm_payload, timeout=20)
 
             metrics["processed"] += 1
-            if len(pending) > 10:
+            if len(pending) > SCALE_THRESHOLD:
                 metrics["scale_signals"] += 1
+                _scale_if_needed()
 
             return {
                 "winner": winner,

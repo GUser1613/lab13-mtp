@@ -19,8 +19,15 @@
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
       - LLM_MODEL=qwen2.5:3b
       - OLLAMA_URL=http://host.docker.internal:11434
+      - COMPOSE_PROJECT_NAME=project-management-mas
+      - SCALE_TARGET_SERVICE=agent-task
+      - SCALE_THRESHOLD=10
+      - SCALE_MAX_REPLICAS=3
+      - SCALE_COOLDOWN_SEC=30
     depends_on: [nats, redis, jaeger]
     ports: ["8000:8000"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   agent-task:
     build: ./agents/task-agent

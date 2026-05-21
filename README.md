@@ -26,8 +26,10 @@
 4. Агент с состоянием:
 - `resource-agent` хранит счетчик в Redis (`resource_agent_count`)
 
-5. Динамическое масштабирование:
-- метрика-сигнал `scale_signals` при высокой нагрузке
+5. Динамическое масштабирование (реализовано через Docker API):
+- при `len(pending) > SCALE_THRESHOLD` оркестратор вызывает Docker SDK
+- автоматически запускается дополнительный контейнер `agent-task-auto-*`
+- добавлены метрики `scale_signals` и `scale_actions`
 
 6. Аукционное распределение:
 - выбор победителя `winner` по минимальной стоимости (`cost`)
@@ -55,6 +57,10 @@
 2. `curl -X POST "http://localhost:8000/run" -H "Content-Type: application/json" -d "{\"title\":\"Final check\",\"description\":\"Run pipeline\",\"due_days\":5,\"estimated_hours\":16,\"budget\":2500}"`
 3. Jaeger: `http://localhost:16686` -> service `orchestrator` -> operation `run_pipeline`
 4. Dashboard: `http://localhost:8501`
+5. Автоскейл:
+- дать параллельную нагрузку на `/run`
+- проверить `scale_actions > 0` в `/health`
+- проверить контейнер `agent-task-auto-*` в `docker ps`
 
 ## Тесты
 1. `cd orchestrator && .venv\Scripts\python.exe -m pytest -q`
@@ -72,4 +78,4 @@
 4. `04_jaeger_trace.png`
 5. `05_docker_ps.png`
 6. `06_go_tests.png`
-
+7. `07_autoscaling_action.png`
