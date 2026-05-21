@@ -1,0 +1,58 @@
+﻿services:
+  nats:
+    image: nats:2.10-alpine
+    ports: ["4222:4222"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    ports: ["16686:16686", "4317:4317"]
+
+  orchestrator:
+    build: ./orchestrator
+    environment:
+      - NATS_URL=nats://nats:4222
+      - REDIS_URL=redis://redis:6379/0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - LLM_MODEL=qwen2.5:3b
+      - OLLAMA_URL=http://host.docker.internal:11434
+    depends_on: [nats, redis, jaeger]
+    ports: ["8000:8000"]
+
+  agent-task:
+    build: ./agents/task-agent
+    environment: [NATS_URL=nats://nats:4222, AGENT_ID=task-agent-1]
+    depends_on: [nats]
+
+  agent-deadline:
+    build: ./agents/deadline-agent
+    environment: [NATS_URL=nats://nats:4222, AGENT_ID=deadline-agent-1]
+    depends_on: [nats]
+
+  agent-resource:
+    build: ./agents/resource-agent
+    environment: [NATS_URL=nats://nats:4222, REDIS_ADDR=redis:6379, AGENT_ID=resource-agent-1]
+    depends_on: [nats, redis]
+
+  agent-budget:
+    build: ./agents/budget-agent
+    environment: [NATS_URL=nats://nats:4222, AGENT_ID=budget-agent-1]
+    depends_on: [nats]
+
+  agent-llm:
+    build: ./llm-agent
+    environment:
+      - NATS_URL=nats://nats:4222
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - LLM_MODEL=qwen2.5:3b
+    depends_on: [nats]
+
+  dashboard:
+    build: ./dashboard
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+    depends_on: [orchestrator]
+    ports: ["8501:8501"]
